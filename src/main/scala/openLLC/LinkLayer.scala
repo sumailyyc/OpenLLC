@@ -37,7 +37,7 @@ class NoSnpPortIO(implicit p: Parameters) extends Bundle with HasPortSwitch {
   val rx = Flipped(new UpwardsNoSnpLinkIO)
 }
 
-class UpwardsLinkMonitor(implicit p: Parameters) extends LLCModule {
+class RNLinkMonitor(implicit p: Parameters) extends LLCModule {
   private val maxLCreditNum = 15
 
   val io = IO(new Bundle() {
@@ -88,6 +88,8 @@ class UpwardsLinkMonitor(implicit p: Parameters) extends LLCModule {
   txOut.linkactivereq := !reset.asBool
   rxOut.linkactiveack := RegNext(rxOut.linkactivereq) || !rxDeact
 
+  io.out.syscoack := RegNext(io.out.syscoreq)
+
   dontTouch(io.out)
 
   def setSrcID[T <: Bundle](in: DecoupledIO[T], srcID: UInt): DecoupledIO[T] = {
@@ -112,7 +114,7 @@ class UpwardsLinkMonitor(implicit p: Parameters) extends LLCModule {
   }
 }
 
-class DownwardsLinkMonitor(implicit p: Parameters) extends LLCModule {
+class SNLinkMonitor(implicit p: Parameters) extends LLCModule {
   private val maxLCreditNum = 15
 
   val io = IO(new Bundle() {
@@ -153,4 +155,78 @@ class DownwardsLinkMonitor(implicit p: Parameters) extends LLCModule {
     out.bits.elements.filter(_._1 == "srcID").head._2 := srcID
     out
   }
+}
+
+class TransmitterLinkMonitor(implicit p: Parameters) extends LLCModule with HasCHIMsgParameters {
+  private val maxLCreditNum = 15
+  val io = IO(new Bundle() {
+    val in = Flipped(new DecoupledPortIO())
+    val out = new PortIO
+  })
+
+  val txState = RegInit(LinkStates.STOP)
+  val rxState = RegInit(LinkStates.STOP)
+
+  Seq(txState, rxState).zip(MixedVecInit(Seq(io.out.tx, io.out.rx))).foreach { case (state, link) =>
+    state := MuxLookup(Cat(link.linkactivereq, link.linkactiveack), LinkStates.STOP)(Seq(
+      Cat(true.B, false.B) -> LinkStates.ACTIVATE,
+      Cat(true.B, true.B) -> LinkStates.RUN,
+      Cat(false.B, true.B) -> LinkStates.DEACTIVATE,
+      Cat(false.B, false.B) -> LinkStates.STOP
+    ))
+  }
+
+  /* IO assignment */
+  val rxsnpDeact, rxrspDeact, rxdatDeact = Wire(Bool())
+  val rxDeact = rxsnpDeact && rxrspDeact && rxdatDeact
+  Decoupled2LCredit(io.in.tx.req, io.out.tx.req, LinkState(txState), Some("txreq"))
+  Decoupled2LCredit(io.in.tx.rsp, io.out.tx.rsp, LinkState(txState), Some("txrsp"))
+  Decoupled2LCredit(io.in.tx.dat, io.out.tx.dat, LinkState(txState), Some("txdat"))
+  LCredit2Decoupled(io.out.rx.snp, io.in.rx.snp, LinkState(rxState), rxsnpDeact, Some("rxsnp"), maxLCreditNum)
+  LCredit2Decoupled(io.out.rx.rsp, io.in.rx.rsp, LinkState(rxState), rxrspDeact, Some("rxrsp"), maxLCreditNum)
+  LCredit2Decoupled(io.out.rx.dat, io.in.rx.dat, LinkState(rxState), rxdatDeact, Some("rxdat"), maxLCreditNum)
+
+  io.out.txsactive := true.B
+  io.out.tx.linkactivereq := !reset.asBool
+  io.out.rx.linkactiveack := RegNext(io.out.rx.linkactivereq) || !rxDeact
+
+  io.out.syscoreq := true.B
+  dontTouch(io.out)
+}
+
+class ReceiverLinkMonitor(implicit p: Parameters) extends LLCModule with HasCHIMsgParameters {
+  private val maxLCreditNum = 15
+  val io = IO(new Bundle() {
+    val in = Flipped(new PortIO)
+    val out = new DecoupledPortIO
+  })
+
+  val txState = RegInit(LinkStates.STOP)
+  val rxState = RegInit(LinkStates.STOP)
+
+  Seq(txState, rxState).zip(MixedVecInit(Seq(io.in.tx, io.in.rx))).foreach { case (state, link) =>
+    state := MuxLookup(Cat(link.linkactivereq, link.linkactiveack), LinkStates.STOP)(Seq(
+      Cat(true.B, false.B) -> LinkStates.ACTIVATE,
+      Cat(true.B, true.B) -> LinkStates.RUN,
+      Cat(false.B, true.B) -> LinkStates.DEACTIVATE,
+      Cat(false.B, false.B) -> LinkStates.STOP
+    ))
+  }
+
+  /* IO assignment */
+  val txreqDeact, txrspDeact, txdatDeact = Wire(Bool())
+  val txDeact = txreqDeact && txrspDeact && txdatDeact
+  LCredit2Decoupled(io.in.tx.req, io.out.tx.req, LinkState(txState), txreqDeact, Some("rxreq"), maxLCreditNum)
+  LCredit2Decoupled(io.in.tx.rsp, io.out.tx.rsp, LinkState(txState), txrspDeact, Some("rxrsp"), maxLCreditNum)
+  LCredit2Decoupled(io.in.tx.dat, io.out.tx.dat, LinkState(txState), txdatDeact, Some("rxdat"), maxLCreditNum)
+  Decoupled2LCredit(io.out.rx.snp, io.in.rx.snp, LinkState(rxState), Some("txsnp"))
+  Decoupled2LCredit(io.out.rx.rsp, io.in.rx.rsp, LinkState(rxState), Some("txrsp"))
+  Decoupled2LCredit(io.out.rx.dat, io.in.rx.dat, LinkState(rxState), Some("txdat"))
+
+  io.in.rxsactive := true.B
+  io.in.rx.linkactivereq := !reset.asBool
+  io.in.tx.linkactiveack := RegNext(io.in.tx.linkactivereq) || !txDeact
+
+  io.in.syscoack := RegNext(io.in.syscoreq)
+  dontTouch(io.in)
 }
