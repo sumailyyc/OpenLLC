@@ -35,9 +35,11 @@ trait HasClientInfo { this: HasOpenLLCParameters =>
   def clientTagBits = fullAddressBits - clientSetBits - bankBits - offsetBits
 }
 
-class SelfMetaEntry(implicit p: Parameters) extends Bundle {
+class SelfMetaEntry(implicit p: Parameters) extends LLCBundle {
   val valid = Bool()
   val dirty = Bool()
+  val compressed = Bool()
+  val length = UInt(log2Ceil(blockBytes * 8).W)
 }
 
 object SelfMetaEntry {
