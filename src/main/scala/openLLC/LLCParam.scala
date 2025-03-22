@@ -39,6 +39,7 @@ case class OpenLLCParam
   clientCaches: Seq[L2Param] = Nil,
   banks: Int = 4,
   FPGAPlatform: Boolean = false,
+  enableCompression: Boolean = false,
 
   // Performance analysis
   enablePerf: Boolean = true,
@@ -86,6 +87,8 @@ trait HasOpenLLCParameters {
 
   def numRNs = cacheParams.clientCaches.size
   def inclusion = if (numRNs == 1) "Exclusive" else "Non-inclusive"
+
+  def numSlots = if (cacheParams.enableCompression) 2 else 1
 
   def topDownOpt  = if(cacheParams.elaboratedTopDown) Some(true) else None
   def hartIds = cacheParams.hartIds

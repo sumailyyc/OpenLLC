@@ -38,8 +38,8 @@ trait HasClientInfo { this: HasOpenLLCParameters =>
 class SelfMetaEntry(implicit p: Parameters) extends LLCBundle {
   val valid = Bool()
   val dirty = Bool()
-  val compressed = Bool()
-  val length = UInt(log2Ceil(blockBytes * 8).W)
+  val compressed = if (cacheParams.enableCompression) Some(Bool()) else None
+  val length = if (cacheParams.enableCompression) Some(UInt(log2Ceil(blockBytes * 8).W)) else None
 }
 
 object SelfMetaEntry {
