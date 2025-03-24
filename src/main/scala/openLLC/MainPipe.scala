@@ -365,6 +365,7 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
   refill_s4.bits.state.s_refill := false.B
   refill_s4.bits.state.w_datRsp := false.B
   refill_s4.bits.state.w_snpRsp := !Cat(snpVec_refill_s4).orR
+  refill_s4.bits.state.s_compress.foreach(_ :=  false.B)
   refill_s4.bits.task := req_s4
   refill_s4.bits.task.tag := parseAddress(snp_address_s4)._1
   refill_s4.bits.task.set := parseAddress(snp_address_s4)._2

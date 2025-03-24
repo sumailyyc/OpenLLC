@@ -33,7 +33,7 @@ class CompressorIO[T <: Data](private val gen: T) extends Bundle {
   // final output data
   val out    = Valid(gen.cloneType)
 
-  // Indicate whether the output data is compressd or not
+  // Indicate whether the output data is compressed or not
   val compressed = Output(Bool())
 
   // The actual length of the compressed data if compression is possible

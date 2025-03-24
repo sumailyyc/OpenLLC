@@ -23,6 +23,7 @@ import org.chipsalliance.cde.config.Parameters
 import coupledL2.tl2chi._
 import coupledL2.tl2chi.CHICohStates._
 import utility.{FastArbiter}
+import compress.{DontCompressor}
 
 class RefillBufRead(implicit p: Parameters) extends LLCBundle {
   val id = Output(UInt(log2Ceil(mshrs.refill).W))
@@ -32,6 +33,7 @@ class RefillState(implicit p: Parameters) extends LLCBundle {
   val s_refill = Bool()
   val w_datRsp = Bool()
   val w_snpRsp = Bool()
+  val s_compress = if (cacheParams.enableCompression) Some(Bool()) else None
 }
 
 class RefillRequest(implicit p: Parameters) extends LLCBundle {
@@ -75,6 +77,8 @@ class RefillUnit(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
   /* Data Structure */
   val buffer   = RegInit(VecInit(Seq.fill(mshrs.refill)(0.U.asTypeOf(new RefillEntry()))))
   val issueArb = Module(new FastArbiter(new Task(), mshrs.refill))
+  val compressor = if (cacheParams.enableCompression) Some(Module(new DontCompressor(io.data.asUInt))) else None
+  val compressArb = if (cacheParams.enableCompression) Some(Module(new FastArbiter(UInt((blockBytes * 8).W), mshrs.refill))) else None
 
   val full = Cat(buffer.map(_.valid)).andR
 
@@ -164,9 +168,34 @@ class RefillUnit(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
     }
   }
 
+  /* Compression */
+  compressArb match {
+    case Some(arb) =>
+      arb.io. in.zip(buffer).foreach { case (in, e) =>
+        in.valid := e.valid && e.state.w_datRsp && !e.state.s_compress.get
+        in.bits := e.data.asUInt
+      }
+      arb.io.out.ready := true.B
+      compressor.get.io.in.valid := arb.io.out.valid
+      compressor.get.io.in.bits := arb.io.out.bits
+      when(arb.io.out.fire) {
+        val entry = buffer(arb.io.chosen)
+        entry.state.s_compress.get := true.B
+        entry.task.compressed.get := compressor.get.io.compressed
+        entry.task.length.get := compressor.get.io.length
+        entry.data.data.zipWithIndex.foreach { case (data, i) =>
+          val beat = Wire(new DSBeat())
+          beat.data := compressor.get.io.out.bits(beatBytes * (i + 1) * 8 - 1, beatBytes * i * 8)
+          data := beat
+        }
+      }
+    case None =>
+  }
+
   /* Issue */
   issueArb.io.in.zip(buffer).foreach { case (in, e) =>
-    in.valid := e.valid && e.state.w_datRsp && !e.state.s_refill && (!e.task.replSnp || e.task.replSnp && e.state.w_snpRsp)
+    in.valid := e.valid && e.state.w_datRsp && e.state.s_compress.getOrElse(true.B) && !e.state.s_refill &&
+      (!e.task.replSnp || e.task.replSnp && e.state.w_snpRsp)
     in.bits := e.task
   }
   issueArb.io.out.ready := true.B
