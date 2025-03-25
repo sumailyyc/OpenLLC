@@ -27,6 +27,13 @@ class DSRequest(implicit p: Parameters) extends LLCBundle {
   val set = UInt(setBits.W)
 }
 
+class DSRead(implicit p: Parameters) extends DSRequest
+
+class DSWrite(implicit p: Parameters) extends DSRequest {
+  val writeLeft = if (cacheParams.enableCompression) Some(Bool()) else None
+  val wlen = if (cacheParams.enableCompression) Some(UInt(log2Ceil(blockBytes * 8 + 1).W)) else None
+}
+
 class DSBeat(implicit p: Parameters) extends LLCBundle {
   val data = UInt((beatBytes * 8).W)
 }
@@ -47,8 +54,8 @@ class DataStorage(implicit p: Parameters) extends LLCModule {
       * When reading and writing the same address,
       * the data before writing is returned
       */
-    val read  = Flipped(ValidIO(new DSRequest()))
-    val write = Flipped(ValidIO(new DSRequest()))
+    val read  = Flipped(ValidIO(new DSRead()))
+    val write = Flipped(ValidIO(new DSWrite()))
     val rdata = Output(new DSBlock())
     val wdata = Input(new DSBlock())
   })
@@ -74,7 +81,21 @@ class DataStorage(implicit p: Parameters) extends LLCModule {
     */
   when (wen) {
     writeBuffer.blockIdx := writeIdx
-    writeBuffer.data := io.wdata
+    if (cacheParams.enableCompression) {
+      val safeLen = io.write.bits.wlen.get.min((blockBytes * 8).U)
+      val mask = Wire(UInt((blockBytes * 8).W))
+      val ones = (1.U << safeLen) - 1.U
+      mask := Mux(io.write.bits.writeLeft.get, ones << ((blockBytes * 8).U - safeLen), ones)
+      val dataShift = Mux(io.write.bits.writeLeft.get, io.wdata.data.asUInt, io.wdata.data.asUInt >> ((blockBytes * 8).U - safeLen))
+      val dataCat = (mask & dataShift) | (~mask & writeBuffer.data.data.asUInt)
+      writeBuffer.data.data.zipWithIndex.foreach { case (data, i) =>
+        val beat = Wire(new DSBeat())
+        beat.data := dataCat(beatBytes * (i + 1) * 8 - 1, beatBytes * i * 8)
+        data := beat
+      }
+    } else {
+      writeBuffer.data := io.wdata
+    }
   }
 
   /* SRAM write logic */

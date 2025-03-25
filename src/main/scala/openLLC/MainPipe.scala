@@ -58,8 +58,8 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
 
     /* interact with datastorage */
     val toDS_s4 = new Bundle() {
-      val read  = ValidIO(new DSRequest())
-      val write = ValidIO(new DSRequest())
+      val read  = ValidIO(new DSRead())
+      val write = ValidIO(new DSWrite())
       val wdata = Output(new DSBlock())
     }
     val rdataFromDS_s6 = Input(new DSBlock())
@@ -449,6 +449,8 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
   io.toDS_s4.write.valid := task_s4.valid && refill_task_s4
   io.toDS_s4.write.bits.way := selfDirResp_s4.way
   io.toDS_s4.write.bits.set := selfDirResp_s4.set
+  io.toDS_s4.write.bits.writeLeft.foreach(_ := true.B)
+  io.toDS_s4.write.bits.wlen.foreach(_ := Mux(task_s4.bits.compressed.get, task_s4.bits.length.get, (blockBytes * 8).U))
   io.toDS_s4.wdata := refillData_s4
 
   val req_drop_s4 = !dataUnready_s4 && !cleanSelfDirty_s4
