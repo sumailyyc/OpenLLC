@@ -33,6 +33,7 @@ class OpenLLC(implicit p: Parameters) extends LLCModule with HasClientInfo {
   println(s"sets:${cacheParams.sets} ways:${cacheParams.ways} blockBytes:${cacheParams.blockBytes}")
   println(s"[snoop filter] size:${sizeBytesToStr(clientSets * clientWays * clientParam.blockBytes.toDouble)} * $banks-bank")
   println(s"[snoop filter] sets:${clientSets} ways:${clientWays}")
+  println(s"replacement policy: ${cacheParams.replacement}")
   println(s"compression enable: ${cacheParams.enableCompression}")
 
   val io = IO(new Bundle {
