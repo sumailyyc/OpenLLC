@@ -110,7 +110,7 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
   val clients_hit_s3    = clientsDirResp_s3.hit
   val originalRN_hit_s3 = clients_hit_s3 && clients_meta_s3(srcID_s3).valid
   val peerRNs_hit_s3    = Cat(clients_meta_s3.zipWithIndex.map { case (meta, i) =>
-    Mux(i.U =/= srcID_s3, clients_meta_s3(i).valid, false.B) 
+    Mux(i.U =/= srcID_s3, meta.valid, false.B) 
   }).orR && clients_hit_s3
 
   if (inclusion == "Exclusive") {
