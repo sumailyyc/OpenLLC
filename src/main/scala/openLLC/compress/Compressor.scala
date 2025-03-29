@@ -91,7 +91,7 @@ class ZeroValueCompressor(gen: UInt, val itemSize: Int) extends Compressor[UInt]
 
 class DontCompressor(gen: UInt) extends Compressor[UInt](gen) {
   def compress(rawData: Valid[UInt]): (Valid[UInt], Bool, UInt) = {
-    (rawData, false.B, gen.getWidth.U)
+    (rawData, false.B, (gen.getWidth - 1).U)
   }
 }
 

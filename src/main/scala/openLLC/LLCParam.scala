@@ -39,7 +39,7 @@ case class OpenLLCParam
   clientCaches: Seq[L2Param] = Nil,
   banks: Int = 4,
   FPGAPlatform: Boolean = false,
-  enableCompression: Boolean = false,
+  enableCompression: Boolean = true,
 
   // Performance analysis
   enablePerf: Boolean = true,

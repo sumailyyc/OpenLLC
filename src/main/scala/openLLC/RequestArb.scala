@@ -43,7 +43,7 @@ class RequestArb(implicit p: Parameters) extends LLCModule with HasClientInfo wi
     val refillInfo = Flipped(Vec(mshrs.refill, ValidIO(new BlockInfo())))
     val respInfo = Flipped(Vec(mshrs.response, ValidIO(new ResponseInfo())))
     val snpInfo = Flipped(Vec(mshrs.snoop, ValidIO(new BlockInfo())))
-    val memInfo = Flipped(Vec(mshrs.memory, ValidIO(new MemInfo())))
+    val memInfo = Flipped(Vec(mshrs.memory, Vec(numSlots, ValidIO(new MemInfo()))))
   })
 
   val pipeInfo   = io.pipeInfo
@@ -93,7 +93,7 @@ class RequestArb(implicit p: Parameters) extends LLCModule with HasClientInfo wi
   val inflight_refill    = PopCount(refillInfo.map(e => e.valid))
   val inflight_snoop     = PopCount(snpInfo.map(e => e.valid))
   val inflight_response  = PopCount(respInfo.map(e => e.valid))
-  val inflight_memAccess = PopCount(memInfo.map(e => e.valid))
+  val inflight_memAccess = PopCount(memInfo.map(e => Cat(e.map(_.valid)).orR))
   val potential_refill, potential_snoop = PopCount(Seq(pipeInfo.s2_valid, pipeInfo.s3_valid, pipeInfo.s4_valid))
   val potential_response, potential_memAccess = PopCount(pipeInfo.valids)
 
@@ -113,9 +113,9 @@ class RequestArb(implicit p: Parameters) extends LLCModule with HasClientInfo wi
     Cat(snpInfo.map(e => e.valid && e.bits.reqID === reqID_s1)).orR ||
     (inflight_snoop +& potential_snoop) >= mshrs.snoop.U
   )
-  val blockByMem = Cat(memInfo.map(e => e.valid && Cat(e.bits.tag, e.bits.set) === Cat(tag_s1, set_s1) &&
+  val blockByMem = Cat(memInfo.flatten.map(e => e.valid && Cat(e.bits.tag, e.bits.set) === Cat(tag_s1, set_s1) &&
     e.bits.opcode === WriteNoSnpFull && (task_s1.bits.refillTask || isClean_s1 || !e.bits.w_datRsp && isRead_s1))).orR ||
-    Cat(memInfo.map(e => e.valid && e.bits.reqID === reqID_s1 && !task_s1.bits.refillTask)).orR ||
+    Cat(memInfo.flatten.map(e => e.valid && e.bits.reqID === reqID_s1 && !task_s1.bits.refillTask)).orR ||
     (inflight_memAccess +& potential_memAccess) >= mshrs.memory.U
 
   val blockEntrance = blockByMainPipe || blockByRefill || blockByResp || blockByMem

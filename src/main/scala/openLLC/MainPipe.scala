@@ -23,6 +23,7 @@ import org.chipsalliance.cde.config.Parameters
 import coupledL2.tl2chi._
 import coupledL2.tl2chi.CHICohStates._
 import utility._
+import compress.{DGBDecompressor}
 
 class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
   val io = IO(new Bundle() {
@@ -47,7 +48,7 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
     /* send ReadNoSnp/WriteNoSnp task to MemUnit */
     val toMemUnit = new Bundle() {
       val alloc_s4 = ValidIO(new MemRequest(withData = false))
-      val alloc_s6 = ValidIO(new MemRequest(withData = true))
+      val alloc_s6 = Vec(numSlots, ValidIO(new MemRequest(withData = true)))
     }
 
     /* send CompDBIDResp/CompData/Comp allocation request to ResponseUnit */
@@ -99,6 +100,14 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
   val self_meta_s3      = selfDirResp_s3.meta
   val clients_meta_s3   = clientsDirResp_s3.meta
 
+  val self_meta_left_s3  = if (cacheParams.enableCompression) Some(self_meta_s3(0)) else None
+  val self_meta_right_s3 = if (cacheParams.enableCompression) Some(self_meta_s3(1)) else None
+  if (cacheParams.enableCompression) {
+    assert(!self_meta_right_s3.get.valid || self_meta_right_s3.get.compressed.get)
+    assert(!(self_meta_left_s3.get.valid && !self_meta_left_s3.get.compressed.get && self_meta_right_s3.get.valid))
+    assert(!(self_meta_left_s3.get.valid && self_meta_right_s3.get.valid && ((self_meta_left_s3.get.length.get +& self_meta_right_s3.get.length.get) > (blockBytes * 8).U)))
+  }
+
   val req_s3         = task_s3.bits
   val opcode_s3      = req_s3.chiOpcode
   val refill_task_s3 = req_s3.refillTask
@@ -106,11 +115,12 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
   val passDirty_s3   = req_s3.resp(2) // Resp[2: 0] = {PassDirty, CacheState[1: 0]}
 
   val self_hit_s3       = selfDirResp_s3.hit
-  val selfDirty_s3      = self_meta_s3.dirty
+  val self_hitId_s3     = selfDirResp_s3.hitId
+  val selfDirty_s3      = VecInit(self_meta_s3.map(_.dirty))
   val clients_hit_s3    = clientsDirResp_s3.hit
-  val originalRN_hit_s3 = clients_hit_s3 && clients_meta_s3(srcID_s3).valid
-  val peerRNs_hit_s3    = Cat(clients_meta_s3.zipWithIndex.map { case (meta, i) =>
-    Mux(i.U =/= srcID_s3, meta.valid, false.B) 
+  val originalRN_hit_s3 = clients_hit_s3 && Cat(clients_meta_s3(srcID_s3).map(_.valid)).orR
+  val peerRNs_hit_s3    = Cat(clients_meta_s3.zipWithIndex.map { case (metas, i) =>
+    Mux(i.U =/= srcID_s3, Cat(metas.map(_.valid)).orR, false.B)
   }).orR && clients_hit_s3
 
   if (inclusion == "Exclusive") {
@@ -156,24 +166,74 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
 
   // Final meta to be written
   val new_self_meta_s3 = WireInit(self_meta_s3)
+  val leftTooLong_s3 = if (cacheParams.enableCompression)
+    Some((self_meta_left_s3.get.length.get +& task_s3.bits.length.get) > (blockBytes * 8).U) else None
+  val rightTooLong_s3 = if (cacheParams.enableCompression)
+    Some((self_meta_right_s3.get.length.get +& task_s3.bits.length.get) > (blockBytes * 8).U) else None
+  val evictRight_s3 = if (cacheParams.enableCompression)
+    Some(self_meta_right_s3.get.valid && (!task_s3.bits.compressed.get || rightTooLong_s3.get)) else None
+  val evictLeft_s3 = if (cacheParams.enableCompression)
+    Some(self_meta_left_s3.get.valid && leftTooLong_s3.get) else None
+  val installLeft_s3 = if (cacheParams.enableCompression) Some(!task_s3.bits.compressed.get || task_s3.bits.compressed.get &&
+      (!self_meta_left_s3.get.valid ||
+        (self_meta_left_s3.get.valid &&
+          (!self_meta_right_s3.get.valid &&
+            (!self_meta_left_s3.get.compressed.get || leftTooLong_s3.get) ||
+              self_meta_right_s3.get.valid && (self_meta_left_s3.get.length.get >= self_meta_right_s3.get.length.get)
+          )
+        )
+      )
+    ) else None
   when(refill_task_s3) {
-    new_self_meta_s3.valid := true.B
-    new_self_meta_s3.dirty := passDirty_s3 || self_hit_s3 && selfDirty_s3
+    if (cacheParams.enableCompression) {
+      val new_self_meta_left_s3 = new_self_meta_s3(0)
+      val new_self_meta_right_s3 = new_self_meta_s3(1)
+      when(installLeft_s3.get) {
+        val selfDirtyLeft_s3 = selfDirty_s3(0)
+        new_self_meta_left_s3.valid := true.B
+        new_self_meta_left_s3.dirty := passDirty_s3 || self_hit_s3 && selfDirtyLeft_s3
+        new_self_meta_left_s3.compressed.get := task_s3.bits.compressed.get
+        new_self_meta_left_s3.length.get := task_s3.bits.length.get
+        when(evictRight_s3.get) {
+          new_self_meta_right_s3.valid := false.B
+        }
+      }.otherwise {
+        val selfDirtyRight_s3 = selfDirty_s3(1)
+        new_self_meta_right_s3.valid := true.B
+        new_self_meta_right_s3.dirty := passDirty_s3 || self_hit_s3 && selfDirtyRight_s3
+        new_self_meta_right_s3.compressed.get := task_s3.bits.compressed.get
+        new_self_meta_right_s3.length.get := task_s3.bits.length.get
+        when(evictLeft_s3.get) {
+          new_self_meta_left_s3.valid := false.B
+        }
+      }
+    } else {
+      new_self_meta_s3.head.valid := true.B
+      new_self_meta_s3.head.dirty := passDirty_s3 || self_hit_s3 && selfDirty_s3.head
+    }
   }
   when(exclusiveReq_s3 || invalidReq_s3) {
-    new_self_meta_s3.valid := false.B
+    if (cacheParams.enableCompression) {
+      new_self_meta_s3(self_hitId_s3).valid := false.B
+    } else {
+      new_self_meta_s3.head.valid := false.B
+    } 
   }
   when(cleanReq_s3) {
-    new_self_meta_s3.dirty := false.B
+    if (cacheParams.enableCompression) {
+      new_self_meta_s3(self_hitId_s3).dirty := false.B
+    } else {
+      new_self_meta_s3.head.dirty := false.B
+    }
   }
 
   val new_clients_meta_s3 = WireInit(clients_meta_s3)
-  new_clients_meta_s3.zipWithIndex.foreach { case (meta, i) =>
+  new_clients_meta_s3.zipWithIndex.foreach { case (metas, i) =>
     when(srcID_s3 === i.U) {
-      meta.valid := !(releaseReq_s3 || invalidReq_s3)
+      metas.foreach(_.valid := !(releaseReq_s3 || invalidReq_s3))
     }.otherwise {
       when(exclusiveReq_s3 || invalidReq_s3) {
-        meta.valid := false.B
+        metas.foreach(_.valid := false.B)
       }
     }
   }
@@ -182,7 +242,7 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
   // tagArray is updated when directory access of an exclusive request does not hit
   clientsTagW_s3.valid := task_s3.valid && exclusiveReq_s3 && !clients_hit_s3
   clientsTagW_s3.bits.apply(
-    lineAddr = reqLineAddr_s3,
+    lineAddr = VecInit(reqLineAddr_s3),
     way = clientsDirResp_s3.way
   )
   /**
@@ -207,9 +267,21 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
 
   /*** Local Directory update ***/
   // tagArray is updated when directory access of a refill task does not hit
+  val selfTagWriteVec_s3 = WireInit(selfDirResp_s3.tag)
+  if (cacheParams.enableCompression) {
+    val selfTagWriteLeft_s3 = selfTagWriteVec_s3(0)
+    val selfTagWriteRight_s3 = selfTagWriteVec_s3(1)
+    when(installLeft_s3.get) {
+      selfTagWriteLeft_s3 := req_s3.tag
+    }.otherwise {
+      selfTagWriteRight_s3 := req_s3.tag
+    }
+  } else {
+    selfTagWriteVec_s3.head := req_s3.tag
+  }
   selfTagW_s3.valid := task_s3.valid && refill_task_s3 && !selfDirResp_s3.hit
   selfTagW_s3.bits.apply(
-    lineAddr = reqLineAddr_s3,
+    lineAddr = VecInit(selfTagWriteVec_s3.map(Cat(_, req_s3.set))),
     way = selfDirResp_s3.way
   )
   /**
@@ -220,7 +292,7 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
     */
   selfMetaW_s3.valid := task_s3.valid && (
     (exclusiveReq_s3 || invalidReq_s3) && self_hit_s3 ||
-    cleanReq_s3 && self_hit_s3 && selfDirty_s3 ||
+    cleanReq_s3 && self_hit_s3 && selfDirty_s3(self_hitId_s3) ||
     refill_task_s3
   )
   selfMetaW_s3.bits.apply(
@@ -276,10 +348,17 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
   val self_meta_s4    = selfDirResp_s4.meta
   val clients_hit_s4  = clientsDirResp_s4.hit
   val clients_meta_s4 = clientsDirResp_s4.meta
-  val selfDirty_s4    = self_meta_s4.dirty
+  val selfDirty_s4    = VecInit(self_meta_s4.map(_.dirty))
+  val self_hitId_s4   = selfDirResp_s4.hitId
+
+  val installLeft_s4        = if (cacheParams.enableCompression) Some(RegNext(installLeft_s3.get, true.B)) else None
+  val self_meta_left_s4     = if (cacheParams.enableCompression) Some(self_meta_s4(0)) else None
+  val self_meta_right_s4    = if (cacheParams.enableCompression) Some(self_meta_s4(1)) else None
+  val evictLeft_s4          = if (cacheParams.enableCompression) Some(RegNext(evictLeft_s3.get, false.B)) else None
+  val evictRight_s4         = if (cacheParams.enableCompression) Some(RegNext(evictRight_s3.get, false.B)) else None
 
   /** Send Snoop task **/
-  val clients_valids_vec_s4 = VecInit(clients_meta_s4.map(_.valid))
+  val clients_valids_vec_s4 = VecInit(clients_meta_s4.map(metas => Cat(metas.map(_.valid)).orR))
   val peerRNs_valids_vec_s4 = VecInit(clients_valids_vec_s4.zipWithIndex.map { case (valid, i) =>
     Mux(i.U === srcID_s4, false.B, valid)
   })
@@ -300,7 +379,7 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
   val need_snoop_s4 = replace_snoop_s4 || request_snoop_s4
   val snp_address_s4 = Mux(
     replace_snoop_s4,
-    Cat(clientsDirResp_s4.tag, clientsDirResp_s4.set, req_s4.bank, req_s4.off),
+    Cat(clientsDirResp_s4.tag.head, clientsDirResp_s4.set, req_s4.bank, req_s4.off),
     Cat(req_s4.tag, req_s4.set, req_s4.bank, req_s4.off)
   )
 
@@ -378,8 +457,8 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
 
   /** Comp task to ResponseUnit **/
   val respSC_s4 = sharedReq_s4
-  val respUC_s4 = makeUnique_s4 || !makeUnique_s4 && exclusiveReq_s4 && (!selfDirty_s4 || !self_hit_s4)
-  val respUD_s4 = !makeUnique_s4 && exclusiveReq_s4 && self_hit_s4 && selfDirty_s4
+  val respUC_s4 = makeUnique_s4 || !makeUnique_s4 && exclusiveReq_s4 && (!selfDirty_s4(self_hitId_s4) || !self_hit_s4)
+  val respUD_s4 = !makeUnique_s4 && exclusiveReq_s4 && self_hit_s4 && selfDirty_s4(self_hitId_s4)
   val respI_s4  = releaseReq_s4 || invalidReq_s4 || cleanReq_s4 || writeCleanFull_s4
   val snpVec_comp_s4 = VecInit(
     Mux(
@@ -409,13 +488,13 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
   comp_s4.bits.state.w_snpRsp := !Cat(snpVec_comp_s4).orR
   comp_s4.bits.state.w_compack := !(readUnique_s4 || readNotSharedDirty_s4 || makeUnique_s4 ||
     writeEvictOrEvict_s4 && self_hit_s4)
-  comp_s4.bits.state.w_comp := !(cleanReq_s4 && self_hit_s4 && selfDirty_s4)
+  comp_s4.bits.state.w_comp := !(cleanReq_s4 && self_hit_s4 && selfDirty_s4(self_hitId_s4))
   comp_s4.bits.task := comp_task_s4
   comp_s4.bits.is_miss := !self_hit_s4
 
   /**  Read/Write request to MemUnit **/
   val mem_task_s4 = WireInit(req_s4)
-  mem_task_s4.tag := Mux(refill_task_s4, selfDirResp_s4.tag, req_s4.tag)
+  mem_task_s4.tag := Mux(refill_task_s4, selfDirResp_s4.tag.head, req_s4.tag)
   mem_task_s4.set := Mux(refill_task_s4, selfDirResp_s4.set, req_s4.set)
   mem_task_s4.txnID := req_s4.reqID
   mem_task_s4.homeNID := req_s4.tgtID
@@ -440,16 +519,30 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
 
   /** DS read/write **/
   val dataUnready_s4 = (readNotSharedDirty_s4 || readUnique_s4) && self_hit_s4
-  val cleanSelfDirty_s4 = refill_task_s4 && !self_hit_s4 && self_meta_s4.valid && selfDirty_s4 ||
-    cleanReq_s4 && self_hit_s4 && selfDirty_s4
-
+  val replaceDirtyLeft_s4 = if (cacheParams.enableCompression)
+    Some(
+      installLeft_s4.get && self_meta_left_s4.get.valid && self_meta_left_s4.get.dirty ||
+      ~installLeft_s4.get && evictLeft_s4.get && self_meta_left_s4.get.dirty
+    ) else None
+  val replaceDirtyRight_s4 = if (cacheParams.enableCompression)
+    Some(
+      ~installLeft_s4.get && self_meta_right_s4.get.valid && self_meta_right_s4.get.dirty ||
+      installLeft_s4.get && evictRight_s4.get && self_meta_right_s4.get.dirty
+    ) else None
+  val replaceClean_s4 = (if (cacheParams.enableCompression) {
+    replaceDirtyLeft_s4.get || replaceDirtyRight_s4.get
+  } else {
+    self_meta_s4.head.valid && selfDirty_s4.head
+  }) && refill_task_s4 && !self_hit_s4
+  val reqClean_s4 = cleanReq_s4 && self_hit_s4 && selfDirty_s4(self_hitId_s4)
+  val cleanSelfDirty_s4 = replaceClean_s4 || reqClean_s4
   io.toDS_s4.read.valid := task_s4.valid && (dataUnready_s4 || cleanSelfDirty_s4)
   io.toDS_s4.read.bits.way := selfDirResp_s4.way
   io.toDS_s4.read.bits.set := selfDirResp_s4.set
   io.toDS_s4.write.valid := task_s4.valid && refill_task_s4
   io.toDS_s4.write.bits.way := selfDirResp_s4.way
   io.toDS_s4.write.bits.set := selfDirResp_s4.set
-  io.toDS_s4.write.bits.writeLeft.foreach(_ := true.B)
+  io.toDS_s4.write.bits.writeLeft.foreach(_ := installLeft_s4.get)
   io.toDS_s4.write.bits.wlen.foreach(_ := Mux(task_s4.bits.compressed.get, task_s4.bits.length.get, (blockBytes * 8).U))
   io.toDS_s4.wdata := refillData_s4
 
@@ -474,15 +567,47 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
 
   /* Stage 6 */
   val task_s6 = RegInit(0.U.asTypeOf(Valid(new Task())))
+  val selfDirResp_s6 = RegNextN(selfDirResp_s4, 2, Some(0.U.asTypeOf(selfDirResp_s4)))
   val cleanSelfDirty_s6 = RegNextN(cleanSelfDirty_s4, 2, Some(false.B))
   task_s6.valid := task_s5.valid
   when(task_s5.valid) {
     task_s6.bits := task_s5.bits
   }
+  val reqClean_s6 = RegNextN(reqClean_s4, 2, Some(false.B))
+  val replaceClean_s6 = RegNextN(replaceClean_s4, 2, Some(false.B))
+  assert(!replaceClean_s6 || !reqClean_s6)
+  val replaceDirtyLeft_s6 = if (cacheParams.enableCompression) Some(RegNextN(replaceDirtyLeft_s4.get, 2, Some(false.B))) else None
+  val replaceDirtyRight_s6 = if (cacheParams.enableCompression) Some(RegNextN(replaceDirtyRight_s4.get, 2, Some(false.B))) else None
 
   val req_s6 = task_s6.bits
+  val self_hitId_s6 = selfDirResp_s6.hitId
 
   // Return CompData when local cache access hits
+  val rawData_s6 = rdata_s6
+  val decompressorLeft = if (cacheParams.enableCompression) Some(Module(new DGBDecompressor(rawData_s6.asUInt))) else None
+  val decompressorRight = if (cacheParams.enableCompression) Some(Module(new DGBDecompressor(rawData_s6.asUInt))) else None
+  decompressorLeft.foreach { m => 
+    m.io.in.valid := selfDirResp_s6.meta(0).valid
+    m.io.in.bits := rawData_s6.asUInt
+  }
+  decompressorRight.foreach { m =>
+    m.io.in.valid := selfDirResp_s6.meta(1).valid
+    m.io.in.bits := rawData_s6.asUInt << ((blockBytes * 8).U - selfDirResp_s6.meta(1).length.get)
+  }
+  val decodeData = if (cacheParams.enableCompression) Some(Wire(Vec(numSlots, chiselTypeOf(rawData_s6)))) else None
+  decodeData.foreach { datas =>
+    datas(0).data.zipWithIndex.foreach { case (data, i) =>
+      val beat = Wire(new DSBeat())
+      beat.data := decompressorLeft.get.io.out.bits(beatBytes * (i + 1) * 8 - 1, beatBytes * i * 8)
+      data := beat
+    }
+    datas(1).data.zipWithIndex.foreach { case (data, i) =>
+      val beat = Wire(new DSBeat())
+      beat.data := decompressorRight.get.io.out.bits(beatBytes * (i + 1) * 8 - 1, beatBytes * i * 8)
+      data := beat
+    }
+  }
+
   comp_s6.valid := task_s6.valid && !cleanSelfDirty_s6
   comp_s6.bits.state.s_comp := false.B
   comp_s6.bits.state.s_urgentRead := true.B
@@ -491,18 +616,59 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
   comp_s6.bits.state.w_compack := false.B
   comp_s6.bits.state.w_comp := true.B
   comp_s6.bits.task := req_s6
-  comp_s6.bits.data.get := rdata_s6
   comp_s6.bits.is_miss := false.B
-
+  comp_s6.bits.data.get := (if (cacheParams.enableCompression) {
+    Mux(
+      !selfDirResp_s6.meta(self_hitId_s6).compressed.get,
+      rawData_s6,
+      decodeData.get(self_hitId_s6)
+    )
+  } else {
+    rawData_s6
+  })
   // Update memory when a dirty block is cleaned
-  mem_s6.valid := task_s6.valid && cleanSelfDirty_s6
-  mem_s6.bits.state.s_issueReq := false.B
-  mem_s6.bits.state.s_issueDat := false.B
-  mem_s6.bits.state.w_datRsp := true.B
-  mem_s6.bits.state.w_dbid := false.B
-  mem_s6.bits.state.w_comp := false.B
-  mem_s6.bits.task := req_s6
-  mem_s6.bits.data.get := rdata_s6
+
+  if (cacheParams.enableCompression) {
+    mem_s6.foreach { task =>
+      task.bits.state.s_issueReq := false.B
+      task.bits.state.s_issueDat := false.B
+      task.bits.state.w_datRsp := true.B
+      task.bits.state.w_dbid := false.B
+      task.bits.state.w_comp := false.B
+      task.bits.task := req_s6
+    }
+    when(reqClean_s6) {
+      mem_s6(0).valid := task_s6.valid && cleanSelfDirty_s6
+      mem_s6(0).bits.data.get := Mux(
+        !selfDirResp_s6.meta(self_hitId_s6).compressed.get,
+        rawData_s6,
+        decodeData.get(self_hitId_s6)
+      )
+      mem_s6(1).valid := false.B
+      mem_s6(1).bits := DontCare
+    }.elsewhen(replaceClean_s6) {
+      mem_s6(0).valid := task_s6.valid && cleanSelfDirty_s6 && replaceDirtyLeft_s6.get
+      mem_s6(1).valid := task_s6.valid && cleanSelfDirty_s6 && replaceDirtyRight_s6.get
+      mem_s6(0).bits.data.get := Mux(selfDirResp_s6.meta(0).compressed.get, decodeData.get(0), rawData_s6)
+      mem_s6(1).bits.data.get := decodeData.get(1)
+      mem_s6(0).bits.task.tag := selfDirResp_s6.tag(0)
+      mem_s6(1).bits.task.tag := selfDirResp_s6.tag(1)
+    }.otherwise {
+      mem_s6.foreach { task =>
+        task.valid := false.B
+        task.bits := DontCare
+      }
+    }
+  } else {
+    mem_s6.head.valid := task_s6.valid && cleanSelfDirty_s6
+    mem_s6.head.bits.state.s_issueReq := false.B
+    mem_s6.head.bits.state.s_issueDat := false.B
+    mem_s6.head.bits.state.w_datRsp := true.B
+    mem_s6.head.bits.state.w_dbid := false.B
+    mem_s6.head.bits.state.w_comp := false.B
+    mem_s6.head.bits.task := req_s6
+    mem_s6.head.bits.data.get := rdata_s6
+  }
 
   pipeInfo.s6_valid := task_s6.valid
   pipeInfo.s6_tag := task_s6.bits.tag

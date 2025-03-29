@@ -23,7 +23,7 @@ import org.chipsalliance.cde.config.Parameters
 import coupledL2.tl2chi._
 import coupledL2.tl2chi.CHICohStates._
 import utility.{FastArbiter}
-import compress.{DontCompressor}
+import compress.{DGBCompressor}
 
 class RefillBufRead(implicit p: Parameters) extends LLCBundle {
   val id = Output(UInt(log2Ceil(mshrs.refill).W))
@@ -77,7 +77,7 @@ class RefillUnit(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
   /* Data Structure */
   val buffer   = RegInit(VecInit(Seq.fill(mshrs.refill)(0.U.asTypeOf(new RefillEntry()))))
   val issueArb = Module(new FastArbiter(new Task(), mshrs.refill))
-  val compressor = if (cacheParams.enableCompression) Some(Module(new DontCompressor(io.data.asUInt))) else None
+  val compressor = if (cacheParams.enableCompression) Some(Module(new DGBCompressor(io.data.asUInt))) else None
   val compressArb = if (cacheParams.enableCompression) Some(Module(new FastArbiter(UInt((blockBytes * 8).W), mshrs.refill))) else None
 
   val full = Cat(buffer.map(_.valid)).andR
@@ -112,7 +112,7 @@ class RefillUnit(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
       val clients_meta = entry.dirResult.clients.meta
 
       assert(
-        !isWrite || inv_CBWrData || clients_hit && clients_meta(rspData.bits.srcID).valid,
+        !isWrite || inv_CBWrData || clients_hit && Cat(clients_meta(rspData.bits.srcID).map(_.valid)).orR,
         "Non-exist block release?(addr: 0x%x)",
         Cat(entry.task.tag, entry.task.set, entry.task.bank, entry.task.off)
       )
