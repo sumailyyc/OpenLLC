@@ -60,20 +60,19 @@ class DataStorage(implicit p: Parameters) extends LLCModule {
     val wdata = Input(new DSBlock())
   })
 
-  // val array = Module(new SRAMTemplate(
-  //   gen = new DSBlock,
-  //   set = blocks,
-  //   way = 1,
-  //   singlePort = false
-  // ))
-  val array = RegInit(VecInit(Seq.fill(blocks)(0.U.asTypeOf(new DSBlock()))))
+  val array = Module(new SRAMTemplate(
+    gen = new DSBlock,
+    set = blocks,
+    way = 1,
+    singlePort = false
+  ))
 
   val ren = io.read.valid
   val wen = io.write.valid
   val readIdx = Cat(io.read.bits.way, io.read.bits.set)
   val writeIdx = Cat(io.write.bits.way, io.write.bits.set)
 
-  // val writeBuffer = RegInit(0.U.asTypeOf(new WBEntry()))
+  val writeBuffer = RegInit(0.U.asTypeOf(new WBEntry()))
 
   /* WriteBuffer update logic */
   /**
@@ -81,40 +80,40 @@ class DataStorage(implicit p: Parameters) extends LLCModule {
     * but are written to the buffer first.
     */
   when (wen) {
+    writeBuffer.blockIdx := writeIdx
     if (cacheParams.enableCompression) {
       val safeLen = io.write.bits.wlen.get.min((blockBytes * 8).U)
       val mask = Wire(UInt((blockBytes * 8).W))
       val ones = (1.U << safeLen) - 1.U
       mask := Mux(io.write.bits.writeLeft.get, ones << ((blockBytes * 8).U - safeLen), ones)
       val dataShift = Mux(io.write.bits.writeLeft.get, io.wdata.data.asUInt, io.wdata.data.asUInt >> ((blockBytes * 8).U - safeLen))
-      val dataCat = (mask & dataShift) | (~mask & array(writeIdx).data.asUInt)
-      array(writeIdx).data.zipWithIndex.foreach { case (data, i) =>
+      val dataCat = (mask & dataShift) | (~mask & writeBuffer.data.data.asUInt)
+      writeBuffer.data.data.zipWithIndex.foreach { case (data, i) =>
         val beat = Wire(new DSBeat())
         beat.data := dataCat(beatBytes * (i + 1) * 8 - 1, beatBytes * i * 8)
         data := beat
       }
     } else {
-      array(writeIdx) := io.wdata
+      writeBuffer.data := io.wdata
     }
   }
 
   /* SRAM write logic */
   // SRAM is written when the data block of the buffer is replaced
-  // val writeHit = writeIdx === writeBuffer.blockIdx
-  // val writeBack = !writeHit && wen
-  // array.io.w.apply(writeBack, writeBuffer.data, writeBuffer.blockIdx, 1.U)
+  val writeHit = writeIdx === writeBuffer.blockIdx
+  val writeBack = !writeHit && wen
+  array.io.w.apply(writeBack, writeBuffer.data, writeBuffer.blockIdx, 1.U)
 
   /* Read request response */
-  // val readHit = readIdx === writeBuffer.blockIdx
-  // val readBuffer = readHit && ren
-  // array.io.r.apply(!readBuffer, readIdx)
-  // val rdata_s1 = Mux(
-  //   RegNext(readBuffer, false.B), 
-  //   RegEnable(writeBuffer.data, 0.U.asTypeOf(new DSBlock), readBuffer),
-  //   array.io.r.resp.data(0)
-  // )
-  val rdata_s1 = RegEnable(array(readIdx), 0.U.asTypeOf(new DSBlock()), ren)
-  val rdata_s2 = RegEnable(rdata_s1, 0.U.asTypeOf(new DSBlock()), RegNext(ren, false.B))
+  val readHit = readIdx === writeBuffer.blockIdx
+  val readBuffer = readHit && ren
+  array.io.r.apply(!readBuffer, readIdx)
+  val rdata_s1 = Mux(
+    RegNext(readBuffer, false.B), 
+    RegEnable(writeBuffer.data, 0.U.asTypeOf(new DSBlock), readBuffer),
+    array.io.r.resp.data(0)
+  )
+  val rdata_s2 = RegEnable(rdata_s1, 0.U.asTypeOf(new DSBlock), RegNext(ren, false.B))
   io.rdata := rdata_s2
 
 }
