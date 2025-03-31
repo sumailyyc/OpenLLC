@@ -35,7 +35,7 @@ case class OpenLLCParam
   beatBytes: Int = 32,
   mshrs: ResourceConfig = ResourceConfig(16, 16, 16, 16),
   fullAddressBits: Int = 16,
-  replacement: String = "random",
+  replacement: String = "capacityFirst",
   clientCaches: Seq[L2Param] = Nil,
   banks: Int = 4,
   FPGAPlatform: Boolean = false,

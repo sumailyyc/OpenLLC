@@ -32,6 +32,7 @@ abstract class LLCBundle(implicit val p: Parameters) extends Bundle
 class ReplacerInfo(implicit p: Parameters) extends LLCBundle {
   val opcode = UInt(REQ_OPCODE_WIDTH.W)
   val refill = Bool()
+  val numSubBlocks = if (cacheParams.enableCompression) Some(UInt(log2Ceil(subBlocks + 1).W)) else None
 }
 
 class Task(implicit p: Parameters) extends LLCBundle {

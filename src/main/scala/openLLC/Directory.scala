@@ -22,7 +22,7 @@ import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import coupledL2.utils.{SRAMTemplate, ReplacementPolicy}
 import coupledL2.tl2chi.HasCHIOpcodes
-import utility.{ParallelPriorityMux}
+import utility.{ParallelPriorityMux, FastArbiter}
 
 trait HasClientInfo { this: HasOpenLLCParameters =>
   def clientCacheParams = cacheParams.clientCaches
@@ -137,6 +137,7 @@ class SubDirectory[T <: Data](
   meta_valid_fn: T => Bool,
   invalid_way_sel: (Seq[Vec[T]], UInt) => (Bool, UInt), // try to find a invalid way
   replacement: String,
+  cheat: (Vec[T], UInt) => UInt,
   slots: Int = 1)(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
 
   override def setBits = log2Ceil(sets)
@@ -158,10 +159,11 @@ class SubDirectory[T <: Data](
   val metaArray = Module(new SRAMTemplate(Vec(slots, chiselTypeOf(meta_init)), sets, ways, singlePort = true))
 
   // Replacer
-  require(replacement == "random" || replacement == "plru")
-  val repl = ReplacementPolicy.fromString(replacement, ways)
+  require(replacement == "random" || replacement == "plru" || replacement == "capacityFirst" && cacheParams.enableCompression)
+  val capacity_repl = replacement == "capacityFirst"
+  val repl = ReplacementPolicy.fromString(if (capacity_repl) "random" else replacement, ways)
   val random_repl = replacement == "random"
-  val replacer_sram_opt = if(random_repl) None else
+  val replacer_sram_opt = if(random_repl || capacity_repl) None else
     Some(Module(new SRAMTemplate(UInt(repl.nBits.W), sets, 1, singlePort = true, shouldReset = true)))
 
   val tagRead = Wire(Vec(ways, Vec(slots, UInt(tagBits.W))))
@@ -226,7 +228,7 @@ class SubDirectory[T <: Data](
 
   /* Replacement logic */
   /** Read, choose replaceWay **/
-  val repl_state_s3 = if(random_repl) {
+  val repl_state_s3 = if(random_repl || capacity_repl) {
     when(io.tagWReq.fire){
       repl.miss
     }
@@ -237,7 +239,42 @@ class SubDirectory[T <: Data](
     repl_state
   }
 
-  replaceWay := repl.get_replace_way(repl_state_s3)
+  val evictTimesVec = if (capacity_repl) Some(metaAll_s3.map(cheat(_, replacerInfo_s3.numSubBlocks.get))) else None
+  val evict0Arb = if (capacity_repl) Some(Module(new FastArbiter(UInt(wayBits.W), ways))) else None
+  val evict1Arb = if (capacity_repl) Some(Module(new FastArbiter(UInt(wayBits.W), ways))) else None
+  val evict2Arb = if (capacity_repl) Some(Module(new FastArbiter(UInt(wayBits.W), ways))) else None
+  evict0Arb.foreach { arb =>
+    arb.io.in.zipWithIndex.foreach { case (in, i) =>
+      in.valid := evictTimesVec.get(i) === 0.U
+      in.bits := i.U
+    }
+    arb.io.out.ready := reqValid_s3 && replacerInfo_s3.refill
+  }
+  evict1Arb.foreach { arb =>
+    arb.io.in.zipWithIndex.foreach { case (in, i) =>
+      in.valid := evictTimesVec.get(i) === 1.U
+      in.bits := i.U
+    }
+    arb.io.out.ready := reqValid_s3 && replacerInfo_s3.refill && !evict0Arb.get.io.out.valid
+  }
+  evict2Arb.foreach { arb =>
+    arb.io.in.zipWithIndex.foreach { case (in, i) =>
+      in.valid := evictTimesVec.get(i) === 2.U
+      in.bits := i.U
+    }
+    arb.io.out.ready := reqValid_s3 && replacerInfo_s3.refill && !evict0Arb.get.io.out.valid && !evict1Arb.get.io.out.valid
+  }
+
+  replaceWay := { if (replacement == "capacityFirst")
+    Mux(
+      evict0Arb.get.io.out.valid,
+      evict0Arb.get.io.out.bits,
+      Mux(
+        evict1Arb.get.io.out.valid,
+        evict1Arb.get.io.out.bits,
+        evict2Arb.get.io.out.bits
+      )
+    ) else repl.get_replace_way(repl_state_s3) }
 
   /** Update replacer meta **/
   // PLRU: update replacer only when Snoopable-Read hit or refill, at stage 3
@@ -326,7 +363,8 @@ class Directory(implicit p: Parameters) extends LLCModule with HasClientInfo {
       meta_init_fn = () => VecInit(Seq.fill(numRNs)(ClientMetaEntry())),
       meta_valid_fn = metas => Cat(metas.map(_.valid)).orR,
       invalid_way_sel = client_invalid_way_sel,
-      replacement = "random"
+      replacement = "random",
+      cheat = { case _ => 0.U }
     )
   )
 
@@ -346,6 +384,34 @@ class Directory(implicit p: Parameters) extends LLCModule with HasClientInfo {
       meta_valid_fn = meta => meta.valid,
       invalid_way_sel = self_invalid_way_sel,
       replacement = cacheParams.replacement,
+      cheat = (metas, installLength) => {
+        if (cacheParams.enableCompression) {
+          assert(!(metas(0).valid && metas(1).valid && (metas(0).numSubBlocks.get +& metas(1).numSubBlocks.get > subBlocks.U)))
+          assert(installLength <= subBlocks.U)
+          val evict0 = (!metas(0).valid && !metas(1).valid) ||
+            (
+              (metas(0).valid || metas(1).valid) && !(metas(0).valid && metas(1).valid) &&
+                (
+                  metas(0).valid && (metas(0).numSubBlocks.get +& installLength <= subBlocks.U) ||
+                  metas(1).valid && (metas(1).numSubBlocks.get +& installLength <= subBlocks.U)
+                )
+            )
+          val evict2 = metas(0).valid && metas(1).valid && (installLength > metas(0).numSubBlocks.get) && (installLength > metas(1).numSubBlocks.get)
+          val evict1 = !evict0 && !evict2
+          assert(PopCount(Seq(evict0, evict1, evict2)) === 1.U)
+          MuxLookup(
+            Cat(evict0, evict1, evict2), 0.U
+          )(
+            Seq(
+              Cat(true.B, false.B, false.B) -> 0.U,
+              Cat(false.B, true.B, false.B) -> 1.U,
+              Cat(false.B, false.B, true.B) -> 2.U
+            )
+          )
+        } else {
+          0.U
+        }
+      },
       slots = numSlots
     )
   )

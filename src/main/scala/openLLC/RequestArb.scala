@@ -140,6 +140,7 @@ class RequestArb(implicit p: Parameters) extends LLCModule with HasClientInfo wi
     addrConnect(p.set, p.tag, set_s1, tag_s1)
     p.replacerInfo.opcode := task_s1.bits.chiOpcode
     p.replacerInfo.refill := task_s1.bits.refillTask
+    p.replacerInfo.numSubBlocks.foreach(_ := Mux(task_s1.bits.compressed.get, task_s1.bits.numSubBlocks.get, subBlocks.U))
   }
 
   /* Stage 2 */
