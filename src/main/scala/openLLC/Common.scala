@@ -45,7 +45,7 @@ class Task(implicit p: Parameters) extends LLCBundle {
   val refillTask = Bool() // is task from RefillUnit
   val bufID = UInt(log2Ceil(mshrs.refill).W)
   val compressed = if (cacheParams.enableCompression) Some(Bool()) else None
-  val length = if (cacheParams.enableCompression) Some(UInt(log2Ceil(blockBytes * 8).W)) else None
+  val numSubBlocks = if (cacheParams.enableCompression) Some(UInt(log2Ceil(subBlocks).W)) else None
 
   // Identify the transaction from LLC
   val reqID = UInt(TXNID_WIDTH.W)

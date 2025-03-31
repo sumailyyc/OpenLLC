@@ -182,7 +182,7 @@ class RefillUnit(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
         val entry = buffer(arb.io.chosen)
         entry.state.s_compress.get := true.B
         entry.task.compressed.get := compressor.get.io.compressed
-        entry.task.length.get := compressor.get.io.length
+        entry.task.numSubBlocks.get := (compressor.get.io.length >> log2Ceil(subBlockBytes * 8)) + (compressor.get.io.length(log2Ceil(subBlockBytes * 8) - 1, 0) =/= 0.U)
         entry.data.data.zipWithIndex.foreach { case (data, i) =>
           val beat = Wire(new DSBeat())
           beat.data := compressor.get.io.out.bits(beatBytes * (i + 1) * 8 - 1, beatBytes * i * 8)

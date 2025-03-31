@@ -40,11 +40,11 @@ abstract class Decompressor[T <: Data](val gen: T) extends Module {
 
 class ZeroValueDecompressor(gen: UInt, val itemSize: Int) extends Decompressor[UInt](gen) {
 
-  assert(isPow2(itemSize), "Illegal item size")
+  require(isPow2(itemSize), "Illegal item size")
 
   def decompress(compressedData: Valid[UInt]): Valid[UInt] = {
     val dataWidth = compressedData.bits.getWidth
-    assert(dataWidth % itemSize == 0, "Illegal data length")
+    require(dataWidth % itemSize == 0, "Illegal data length")
 
     val numItems = dataWidth / itemSize
     val combined = compressedData.bits ## 0.U(numItems.W)

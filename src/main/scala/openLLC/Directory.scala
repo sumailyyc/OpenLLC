@@ -39,7 +39,7 @@ class SelfMetaEntry(implicit p: Parameters) extends LLCBundle {
   val valid = Bool()
   val dirty = Bool()
   val compressed = if (cacheParams.enableCompression) Some(Bool()) else None
-  val length = if (cacheParams.enableCompression) Some(UInt(log2Ceil(blockBytes * 8).W)) else None
+  val numSubBlocks = if (cacheParams.enableCompression) Some(UInt(log2Ceil(subBlocks).W)) else None
 }
 
 object SelfMetaEntry {

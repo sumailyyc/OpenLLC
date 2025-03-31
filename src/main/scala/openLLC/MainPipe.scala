@@ -105,7 +105,7 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
   if (cacheParams.enableCompression) {
     assert(!self_meta_right_s3.get.valid || self_meta_right_s3.get.compressed.get)
     assert(!(self_meta_left_s3.get.valid && !self_meta_left_s3.get.compressed.get && self_meta_right_s3.get.valid))
-    assert(!(self_meta_left_s3.get.valid && self_meta_right_s3.get.valid && ((self_meta_left_s3.get.length.get +& self_meta_right_s3.get.length.get) > (blockBytes * 8).U)))
+    assert(!(self_meta_left_s3.get.valid && self_meta_right_s3.get.valid && ((self_meta_left_s3.get.numSubBlocks.get +& self_meta_right_s3.get.numSubBlocks.get) > subBlocks.U)))
   }
 
   val req_s3         = task_s3.bits
@@ -167,9 +167,9 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
   // Final meta to be written
   val new_self_meta_s3 = WireInit(self_meta_s3)
   val leftTooLong_s3 = if (cacheParams.enableCompression)
-    Some((self_meta_left_s3.get.length.get +& task_s3.bits.length.get) > (blockBytes * 8).U) else None
+    Some((self_meta_left_s3.get.numSubBlocks.get +& task_s3.bits.numSubBlocks.get) > subBlocks.U) else None
   val rightTooLong_s3 = if (cacheParams.enableCompression)
-    Some((self_meta_right_s3.get.length.get +& task_s3.bits.length.get) > (blockBytes * 8).U) else None
+    Some((self_meta_right_s3.get.numSubBlocks.get +& task_s3.bits.numSubBlocks.get) > subBlocks.U) else None
   val evictRight_s3 = if (cacheParams.enableCompression)
     Some(self_meta_right_s3.get.valid && (!task_s3.bits.compressed.get || rightTooLong_s3.get)) else None
   val evictLeft_s3 = if (cacheParams.enableCompression)
@@ -179,7 +179,7 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
         (self_meta_left_s3.get.valid &&
           (!self_meta_right_s3.get.valid &&
             (!self_meta_left_s3.get.compressed.get || leftTooLong_s3.get) ||
-              self_meta_right_s3.get.valid && (self_meta_left_s3.get.length.get >= self_meta_right_s3.get.length.get)
+              self_meta_right_s3.get.valid && (self_meta_left_s3.get.numSubBlocks.get >= self_meta_right_s3.get.numSubBlocks.get)
           )
         )
       )
@@ -193,7 +193,7 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
         new_self_meta_left_s3.valid := true.B
         new_self_meta_left_s3.dirty := passDirty_s3 || self_hit_s3 && selfDirtyLeft_s3
         new_self_meta_left_s3.compressed.get := task_s3.bits.compressed.get
-        new_self_meta_left_s3.length.get := task_s3.bits.length.get
+        new_self_meta_left_s3.numSubBlocks.get := task_s3.bits.numSubBlocks.get
         when(evictRight_s3.get) {
           new_self_meta_right_s3.valid := false.B
         }
@@ -202,7 +202,7 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
         new_self_meta_right_s3.valid := true.B
         new_self_meta_right_s3.dirty := passDirty_s3 || self_hit_s3 && selfDirtyRight_s3
         new_self_meta_right_s3.compressed.get := task_s3.bits.compressed.get
-        new_self_meta_right_s3.length.get := task_s3.bits.length.get
+        new_self_meta_right_s3.numSubBlocks.get := task_s3.bits.numSubBlocks.get
         when(evictLeft_s3.get) {
           new_self_meta_left_s3.valid := false.B
         }
@@ -543,7 +543,7 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
   io.toDS_s4.write.bits.way := selfDirResp_s4.way
   io.toDS_s4.write.bits.set := selfDirResp_s4.set
   io.toDS_s4.write.bits.writeLeft.foreach(_ := installLeft_s4.get)
-  io.toDS_s4.write.bits.wlen.foreach(_ := Mux(task_s4.bits.compressed.get, task_s4.bits.length.get, (blockBytes * 8).U))
+  io.toDS_s4.write.bits.wSubBlocks.foreach(_ := Mux(task_s4.bits.compressed.get, task_s4.bits.numSubBlocks.get, subBlocks.U))
   io.toDS_s4.wdata := refillData_s4
 
   val req_drop_s4 = !dataUnready_s4 && !cleanSelfDirty_s4
@@ -592,7 +592,7 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
   }
   decompressorRight.foreach { m =>
     m.io.in.valid := selfDirResp_s6.meta(1).valid
-    m.io.in.bits := rawData_s6.asUInt << ((blockBytes * 8).U - selfDirResp_s6.meta(1).length.get)
+    m.io.in.bits := rawData_s6.asUInt << ((blockBytes * 8).U - (selfDirResp_s6.meta(1).numSubBlocks.get << log2Ceil(subBlockBytes * 8)))
   }
   val decodeData = if (cacheParams.enableCompression) Some(Wire(Vec(numSlots, chiselTypeOf(rawData_s6)))) else None
   decodeData.foreach { datas =>

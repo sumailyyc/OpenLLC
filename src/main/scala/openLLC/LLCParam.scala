@@ -40,6 +40,7 @@ case class OpenLLCParam
   banks: Int = 4,
   FPGAPlatform: Boolean = false,
   enableCompression: Boolean = true,
+  subBlockBytes: Int = 8,
 
   // Performance analysis
   enablePerf: Boolean = true,
@@ -72,6 +73,9 @@ trait HasOpenLLCParameters {
   def beatSize = blockBytes / beatBytes
   def blocks = cacheParams.ways * cacheParams.sets
   def banks = cacheParams.banks
+  def subBlockBytes = cacheParams.subBlockBytes
+  def subBlocks = blockBytes / subBlockBytes
+  require(isPow2(subBlocks) && isPow2(subBlockBytes))
 
   def wayBits = log2Ceil(cacheParams.ways)
   def setBits = log2Ceil(cacheParams.sets)
