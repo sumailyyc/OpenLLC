@@ -24,6 +24,7 @@ import coupledL2.tl2chi._
 import coupledL2.tl2chi.CHICohStates._
 import utility.{FastArbiter}
 import compress.{DGBCompressor}
+import utility.XSPerfAccumulate
 
 class RefillBufRead(implicit p: Parameters) extends LLCBundle {
   val id = Output(UInt(log2Ceil(mshrs.refill).W))
@@ -178,6 +179,13 @@ class RefillUnit(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
       arb.io.out.ready := true.B
       compressor.get.io.in.valid := arb.io.out.valid
       compressor.get.io.in.bits := arb.io.out.bits
+      XSPerfAccumulate("compression_length", Mux(
+          compressor.get.io.compressed,
+          compressor.get.io.length,
+          (blockBytes * 8).U
+        ) & Fill(log2Ceil(blockBytes * 8 + 1), compressor.get.io.out.valid)
+      )
+      XSPerfAccumulate("rawdata_length", (blockBytes * 8).U & Fill(log2Ceil(blockBytes * 8 + 1), compressor.get.io.out.valid))
       when(arb.io.out.fire) {
         val entry = buffer(arb.io.chosen)
         entry.state.s_compress.get := true.B

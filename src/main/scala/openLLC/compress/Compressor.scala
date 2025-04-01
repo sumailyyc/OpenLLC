@@ -22,6 +22,7 @@ import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import DataTransformer._
 import utility.{ParallelMax, ParallelMin}
+import utility.XSPerfAccumulate
 
 /** IO bundle definition for an Compressor, which takes one valid input and outputs
   * the compressed data.
@@ -211,7 +212,7 @@ object DataTransformer {
   }
 }
 
-class DGBCompressor(gen: UInt) extends Compressor[UInt](gen) {
+class DGBCompressor(gen: UInt)(implicit p: Parameters) extends Compressor[UInt](gen) {
   
   def compress(in: Valid[UInt]) = {
     val rawData = in.bits
@@ -299,6 +300,12 @@ class DGBCompressor(gen: UInt) extends Compressor[UInt](gen) {
     compressedData.valid := in.valid
     compressedData.bits := Mux(canCompress, combined(combined.getWidth - 1, header.getWidth), rawData)
     assert(canCompress || rawData === compressedData.bits)
+    XSPerfAccumulate("ZeroValuePattern", compressedData.valid && canCompress && dgbId === 0.U)
+    XSPerfAccumulate("ValueLocality8bPattern", compressedData.valid && canCompress && dgbId === 1.U)
+    XSPerfAccumulate("ValueLocality16bPattern", compressedData.valid && canCompress && dgbId === 2.U)
+    XSPerfAccumulate("ValueLocality32bPattern", compressedData.valid && canCompress && dgbId === 3.U)
+    XSPerfAccumulate("ValueLocality64bPattern", compressedData.valid && canCompress && dgbId === 4.U)
+    XSPerfAccumulate("OtherPattern", compressedData.valid && !canCompress)
     (compressedData, canCompress, totalLen)
   }
 }
