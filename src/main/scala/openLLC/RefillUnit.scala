@@ -23,7 +23,7 @@ import org.chipsalliance.cde.config.Parameters
 import coupledL2.tl2chi._
 import coupledL2.tl2chi.CHICohStates._
 import utility.{FastArbiter}
-import compress.{DGBCompressor}
+import compress.{DGBCompressor, DGBDecompressor}
 import utility.XSPerfAccumulate
 
 class RefillBufRead(implicit p: Parameters) extends LLCBundle {
@@ -80,6 +80,7 @@ class RefillUnit(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
   val issueArb = Module(new FastArbiter(new Task(), mshrs.refill))
   val compressor = if (cacheParams.enableCompression) Some(Module(new DGBCompressor(io.data.asUInt))) else None
   val compressArb = if (cacheParams.enableCompression) Some(Module(new FastArbiter(UInt((blockBytes * 8).W), mshrs.refill))) else None
+  val decompressor = if (cacheParams.enableCompression) Some(Module(new DGBDecompressor(io.data.asUInt))) else None
 
   val full = Cat(buffer.map(_.valid)).andR
 
@@ -179,6 +180,9 @@ class RefillUnit(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
       arb.io.out.ready := true.B
       compressor.get.io.in.valid := arb.io.out.valid
       compressor.get.io.in.bits := arb.io.out.bits
+      decompressor.get.io.in.valid := compressor.get.io.out.valid && compressor.get.io.compressed
+      decompressor.get.io.in.bits := (compressor.get.io.out.bits >> (decompressor.get.io.out.bits.getWidth.U - compressor.get.io.length)) << (decompressor.get.io.out.bits.getWidth.U - compressor.get.io.length)
+      assert(!decompressor.get.io.in.valid || decompressor.get.io.out.bits === compressor.get.io.in.bits)
       XSPerfAccumulate("compression_length", Mux(
           compressor.get.io.compressed,
           compressor.get.io.length,
