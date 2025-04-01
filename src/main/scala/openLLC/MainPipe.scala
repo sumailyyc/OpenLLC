@@ -142,6 +142,10 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
     readNotSharedDirty_s3 || readUnique_s3 || makeUnique_s3 || writeBackFull_s3 || evict_s3 || makeInvalid_s3 ||
     cleanInvalid_s3 || cleanShared_s3 || writeCleanFull_s3 || writeEvictOrEvict_s3, "Unsupported opcode")
 
+  if (cacheParams.enableCompression) {
+    assert(!task_s3.valid || !Cat(selfDirResp_s3.meta.map(m => m.valid && m.compressed.get && m.numSubBlocks.get === 0.U)).orR)
+  }
+
   /**
     * Requests have different coherence states after processing
     * 1. Exclusive: all cache lines except owned by the requester will be invalidated
