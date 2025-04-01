@@ -192,12 +192,18 @@ class RefillUnit(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
       XSPerfAccumulate("rawdata_length", (blockBytes * 8).U & Fill(log2Ceil(blockBytes * 8 + 1), compressor.get.io.out.valid))
       when(arb.io.out.fire) {
         val entry = buffer(arb.io.chosen)
+        val numSubBlocks = (compressor.get.io.length >> log2Ceil(subBlockBytes * 8)) +& (compressor.get.io.length(log2Ceil(subBlockBytes * 8) - 1, 0) =/= 0.U)
+        val compressed = compressor.get.io.compressed && numSubBlocks =/= subBlocks.U
         entry.state.s_compress.get := true.B
-        entry.task.compressed.get := compressor.get.io.compressed
-        entry.task.numSubBlocks.get := (compressor.get.io.length >> log2Ceil(subBlockBytes * 8)) + (compressor.get.io.length(log2Ceil(subBlockBytes * 8) - 1, 0) =/= 0.U)
+        entry.task.compressed.get := compressed
+        entry.task.numSubBlocks.get := numSubBlocks
         entry.data.data.zipWithIndex.foreach { case (data, i) =>
           val beat = Wire(new DSBeat())
-          beat.data := compressor.get.io.out.bits(beatBytes * (i + 1) * 8 - 1, beatBytes * i * 8)
+          beat.data := Mux(
+            compressed,
+            compressor.get.io.out.bits(beatBytes * (i + 1) * 8 - 1, beatBytes * i * 8),
+            arb.io.out.bits(beatBytes * (i + 1) * 8 - 1, beatBytes * i * 8)
+          )
           data := beat
         }
       }

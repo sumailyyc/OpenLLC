@@ -685,6 +685,5 @@ class MainPipe(implicit p: Parameters) extends LLCModule with HasCHIOpcodes {
     XSPerfAccumulate(s"subBlocks_${i}_total", task_s3.valid && refill_task_s3 && task_s3.bits.compressed.getOrElse(false.B) &&
       (task_s3.bits.numSubBlocks.getOrElse(subBlocks.U) === i.U))
   }
-  XSPerfAccumulate("subBlocks_uncompressed_total", task_s3.valid && refill_task_s3 && (!task_s3.bits.compressed.getOrElse(false.B) ||
-    task_s3.bits.compressed.getOrElse(false.B) && (task_s3.bits.numSubBlocks.getOrElse(subBlocks.U) === subBlocks.U)))
+  XSPerfAccumulate("subBlocks_uncompressed_total", task_s3.valid && refill_task_s3 && (!task_s3.bits.compressed.getOrElse(false.B)))
 }
